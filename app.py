@@ -1,29 +1,39 @@
 # ============================================================
 # EXAMINA AI
-# THREE-DOCUMENT EXAMINATION MARKING LAB
+# THREE-UPLOAD EXAM MARKING SYSTEM
 #
-# INPUTS
-#   1. Typed / printed question paper
-#   2. Handwritten marking scheme
-#   3. Handwritten student answer
+# 1. Typed question paper
+# 2. Handwritten marking scheme
+# 3. Handwritten student answer
 #
-# PIPELINE
-#   Question paper  -> PaddleOCR
-#   Marking scheme  -> Makky07/Trocr
-#   Student answer  -> Makky07/Trocr
-#   OCR verification/editing
-#   Question parsing
-#   AI marking
-#   Score + feedback
+# OCR:
+#   Typed      -> TrOCR printed
+#   Handwriting-> Makky07/Trocr
+#
+# Marking:
+#   Verified OCR -> OpenAI Responses API
 # ============================================================
 
 import os
 import re
 import json
-import base64
-from pathlib import Path
+from io import BytesIO
 
 import streamlit as st
+
+
+# ============================================================
+# CONFIGURATION
+# ============================================================
+
+APP_TITLE = "Examina AI"
+
+HANDWRITING_MODEL = "Makky07/Trocr"
+
+# Printed-text model used for the typed question paper.
+PRINTED_MODEL = "microsoft/trocr-base-printed"
+
+DEFAULT_MARKING_MODEL = "gpt-5.6-luna"
 
 
 # ============================================================
@@ -31,35 +41,9 @@ import streamlit as st
 # ============================================================
 
 st.set_page_config(
-    page_title="Examina AI",
+    page_title=APP_TITLE,
     page_icon="📝",
     layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-
-# ============================================================
-# CONSTANTS
-# ============================================================
-
-APP_NAME = "Examina AI"
-
-HF_HANDWRITING_REPO = "Makky07/Trocr"
-
-CACHE_DIR = (
-    Path.home()
-    / ".cache"
-    / "examina_ai"
-)
-
-HANDWRITING_DIR = (
-    CACHE_DIR
-    / "handwriting"
-)
-
-TYPED_DIR = (
-    CACHE_DIR
-    / "typed"
 )
 
 
@@ -67,402 +51,481 @@ TYPED_DIR = (
 # SESSION STATE
 # ============================================================
 
-DEFAULT_STATE = {
+if "question_text" not in st.session_state:
+    st.session_state.question_text = ""
 
-    "question_ocr": "",
+if "scheme_text" not in st.session_state:
+    st.session_state.scheme_text = ""
 
-    "marking_scheme_ocr": "",
+if "answer_text" not in st.session_state:
+    st.session_state.answer_text = ""
 
-    "student_answer_ocr": "",
-
-    "marking_result": None,
-
-    "question_file_name": None,
-
-    "scheme_file_name": None,
-
-    "answer_file_name": None,
-
-}
-
-for key, value in DEFAULT_STATE.items():
-
-    if key not in st.session_state:
-
-        st.session_state[key] = value
+if "result" not in st.session_state:
+    st.session_state.result = None
 
 
 # ============================================================
-# BASIC HELPERS
+# HELPERS
 # ============================================================
 
-def normalize_text(text):
+def clean_text(text):
+    """Clean OCR output without destroying useful structure."""
 
-    if text is None:
+    if not text:
         return ""
 
     text = str(text)
 
-    text = text.replace(
-        "\r\n",
-        "\n"
-    )
+    text = text.replace("\r\n", "\n")
+    text = text.replace("\r", "\n")
 
-    text = text.replace(
-        "\r",
-        "\n"
-    )
+    # Remove excessive spaces while preserving newlines.
+    text = re.sub(r"[ \t]+", " ", text)
 
-    text = re.sub(
-        r"[ \t]+",
-        " ",
-        text
-    )
-
-    text = re.sub(
-        r"\n{3,}",
-        "\n\n",
-        text
-    )
+    # Remove excessive blank lines.
+    text = re.sub(r"\n{3,}", "\n\n", text)
 
     return text.strip()
 
 
-def safe_json_loads(text):
-
-    if not text:
-        return None
-
-    try:
-
-        return json.loads(text)
-
-    except Exception:
-
-        return None
-
-
-# ============================================================
-# DEVICE
-# ============================================================
-
 def get_device():
+    """Return CUDA if available, otherwise CPU."""
 
     try:
-
         import torch
 
         if torch.cuda.is_available():
-
             return "cuda"
 
     except Exception:
-
         pass
 
     return "cpu"
 
 
 # ============================================================
-# IMAGE → BASE64
+# TR OCR LOADER
 # ============================================================
 
-def image_to_base64(uploaded_file):
-
-    data = uploaded_file.getvalue()
-
-    encoded = base64.b64encode(
-        data
-    ).decode("utf-8")
-
-    return encoded
-
-
-# ============================================================
-# TYPED OCR
-# ============================================================
-
-@st.cache_resource(
-    show_spinner=False
-)
-def load_typed_ocr():
-
-    from paddleocr import PaddleOCR
-
-    return PaddleOCR()
-
-
-def run_typed_ocr(uploaded_file):
-
-    import numpy as np
-    from PIL import Image
-
-    model = load_typed_ocr()
-
-    image = Image.open(
-        uploaded_file
-    ).convert("RGB")
-
-    image_np = np.array(
-        image
-    )
-
-    result = model.predict(
-        image_np
-    )
-
-    texts = []
-
-    for page in result:
-
-        try:
-
-            data = page.json
-
-            if callable(data):
-
-                data = data()
-
-            if isinstance(
-                data,
-                str
-            ):
-
-                data = json.loads(
-                    data
-                )
-
-            page_texts = data.get(
-                "rec_texts",
-                []
-            )
-
-            for text in page_texts:
-
-                if str(text).strip():
-
-                    texts.append(
-                        str(text).strip()
-                    )
-
-        except Exception:
-
-            # Fallback for different
-            # PaddleOCR result versions
-            try:
-
-                if hasattr(
-                    page,
-                    "rec_texts"
-                ):
-
-                    values = (
-                        page.rec_texts
-                    )
-
-                    for value in values:
-
-                        if str(value).strip():
-
-                            texts.append(
-                                str(value).strip()
-                            )
-
-            except Exception:
-
-                pass
-
-    return normalize_text(
-        "\n".join(texts)
-    )
-
-
-# ============================================================
-# HANDWRITING MODEL
-# ============================================================
-
-@st.cache_resource(
-    show_spinner=False
-)
-def load_handwriting_model():
+@st.cache_resource(show_spinner=False)
+def load_trocr(model_name):
 
     import torch
 
-    from huggingface_hub import (
-        snapshot_download
-    )
-
     from transformers import (
         TrOCRProcessor,
-        VisionEncoderDecoderModel
+        VisionEncoderDecoderModel,
     )
 
-    HANDWRITING_DIR.mkdir(
-        parents=True,
-        exist_ok=True
+    processor = TrOCRProcessor.from_pretrained(
+        model_name,
+        use_fast=False,
     )
 
-    # --------------------------------------------------------
-    # Download model only once
-    # --------------------------------------------------------
-
-    snapshot_download(
-        repo_id=HF_HANDWRITING_REPO,
-        local_dir=str(
-            HANDWRITING_DIR
-        )
+    model = VisionEncoderDecoderModel.from_pretrained(
+        model_name
     )
 
-    processor = (
-        TrOCRProcessor.from_pretrained(
-            str(HANDWRITING_DIR),
-            use_fast=False
-        )
-    )
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    model = (
-        VisionEncoderDecoderModel
-        .from_pretrained(
-            str(HANDWRITING_DIR)
-        )
-    )
-
-    device = get_device()
-
-    model.to(
-        device
-    )
-
+    model.to(device)
     model.eval()
 
-    return (
-        processor,
-        model,
-        device
+    return processor, model, device
+
+
+# ============================================================
+# IMAGE PREPROCESSING
+# ============================================================
+
+def prepare_image(uploaded_file):
+
+    from PIL import Image
+
+    image = Image.open(
+        BytesIO(
+            uploaded_file.getvalue()
+        )
     )
+
+    image = image.convert("RGB")
+
+    return image
+
+
+# ============================================================
+# SINGLE IMAGE OCR
+# ============================================================
+
+def trocr_image(
+    image,
+    model_name,
+    max_new_tokens=128,
+):
+
+    import torch
+
+    processor, model, device = load_trocr(
+        model_name
+    )
+
+    pixel_values = processor(
+        images=image,
+        return_tensors="pt",
+    ).pixel_values
+
+    pixel_values = pixel_values.to(device)
+
+    with torch.no_grad():
+
+        generated_ids = model.generate(
+            pixel_values,
+            max_new_tokens=max_new_tokens,
+            num_beams=4,
+        )
+
+    text = processor.batch_decode(
+        generated_ids,
+        skip_special_tokens=True,
+    )[0]
+
+    return clean_text(text)
+
+
+# ============================================================
+# HANDWRITING LINE SEGMENTATION
+# ============================================================
+
+def segment_handwriting_lines(image):
+
+    """
+    Attempts to split a handwritten page into horizontal
+    writing lines.
+
+    This is important because TrOCR is primarily a text-line
+    recognition model rather than a complete-page OCR engine.
+    """
+
+    import cv2
+    import numpy as np
+    from PIL import Image
+
+    rgb = np.array(image)
+
+    gray = cv2.cvtColor(
+        rgb,
+        cv2.COLOR_RGB2GRAY,
+    )
+
+    # Mild blur reduces tiny noise.
+    gray = cv2.GaussianBlur(
+        gray,
+        (3, 3),
+        0,
+    )
+
+    # Binary image.
+    _, binary = cv2.threshold(
+        gray,
+        0,
+        255,
+        cv2.THRESH_BINARY_INV
+        + cv2.THRESH_OTSU,
+    )
+
+    height, width = binary.shape
+
+    # Horizontal projection.
+    projection = np.sum(
+        binary > 0,
+        axis=1,
+    )
+
+    # A row is considered part of writing when
+    # enough foreground pixels occur.
+    threshold = max(
+        2,
+        int(width * 0.005),
+    )
+
+    active = projection > threshold
+
+    ranges = []
+
+    start = None
+
+    for y, value in enumerate(active):
+
+        if value and start is None:
+
+            start = y
+
+        elif not value and start is not None:
+
+            end = y
+
+            if end - start >= 8:
+
+                ranges.append(
+                    (start, end)
+                )
+
+            start = None
+
+    if start is not None:
+
+        ranges.append(
+            (start, height)
+        )
+
+    # Merge lines that are very close together.
+    merged = []
+
+    for start, end in ranges:
+
+        if not merged:
+
+            merged.append(
+                [start, end]
+            )
+
+        else:
+
+            previous = merged[-1]
+
+            if start - previous[1] < 12:
+
+                previous[1] = end
+
+            else:
+
+                merged.append(
+                    [start, end]
+                )
+
+    # Padding around each line.
+    padding_y = max(
+        8,
+        int(height * 0.01)
+    )
+
+    crops = []
+
+    for start, end in merged:
+
+        y1 = max(
+            0,
+            start - padding_y
+        )
+
+        y2 = min(
+            height,
+            end + padding_y
+        )
+
+        crop = rgb[
+            y1:y2,
+            0:width
+        ]
+
+        if crop.shape[0] < 15:
+            continue
+
+        crops.append(
+            Image.fromarray(
+                crop
+            )
+        )
+
+    # If segmentation failed, use the complete image.
+    if not crops:
+
+        crops = [image]
+
+    return crops
 
 
 # ============================================================
 # HANDWRITING OCR
 # ============================================================
 
-def run_handwriting_ocr(
-    uploaded_file
-):
+def handwriting_ocr(uploaded_file):
 
-    import torch
-
-    from PIL import Image
-
-    (
-        processor,
-        model,
-        device
-    ) = load_handwriting_model()
-
-    image = Image.open(
+    image = prepare_image(
         uploaded_file
-    ).convert("RGB")
-
-    pixel_values = processor(
-        images=image,
-        return_tensors="pt"
-    ).pixel_values
-
-    pixel_values = pixel_values.to(
-        device
     )
 
-    with torch.no_grad():
+    lines = segment_handwriting_lines(
+        image
+    )
 
-        generated_ids = (
-            model.generate(
-                pixel_values,
-                max_new_tokens=512,
-                num_beams=4
+    results = []
+
+    progress = st.progress(
+        0,
+        text="Reading handwriting..."
+    )
+
+    total = len(lines)
+
+    for index, line_image in enumerate(
+        lines
+    ):
+
+        try:
+
+            text = trocr_image(
+                line_image,
+                HANDWRITING_MODEL,
+                max_new_tokens=128,
+            )
+
+            if text:
+
+                results.append(
+                    text
+                )
+
+        except Exception as error:
+
+            results.append(
+                f"[OCR ERROR: {error}]"
+            )
+
+        progress.progress(
+            (index + 1) / total,
+            text=(
+                f"Reading handwriting "
+                f"{index + 1}/{total}"
             )
         )
 
-    text = processor.batch_decode(
-        generated_ids,
-        skip_special_tokens=True
-    )[0]
+    progress.empty()
 
-    return normalize_text(
-        text
+    return clean_text(
+        "\n".join(results)
     )
 
 
 # ============================================================
-# QUESTION PARSING
+# TYPED QUESTION PAPER OCR
 # ============================================================
 
-def parse_questions(question_text):
+def typed_ocr(uploaded_file):
 
-    """
-    Attempts to split the question paper into
-    numbered questions.
-
-    Supports patterns such as:
-
-        1.
-        1)
-        1:
-        Question 1
-        Question 1:
-        Q1
-        Q1.
-    """
-
-    question_text = normalize_text(
-        question_text
+    image = prepare_image(
+        uploaded_file
     )
 
-    if not question_text:
+    # Printed TrOCR is still a line recognition model.
+    # We therefore use the same segmentation approach,
+    # but with the printed checkpoint.
+    lines = segment_handwriting_lines(
+        image
+    )
 
+    results = []
+
+    progress = st.progress(
+        0,
+        text="Reading typed question paper..."
+    )
+
+    total = len(lines)
+
+    for index, line_image in enumerate(
+        lines
+    ):
+
+        try:
+
+            text = trocr_image(
+                line_image,
+                PRINTED_MODEL,
+                max_new_tokens=256,
+            )
+
+            if text:
+
+                results.append(
+                    text
+                )
+
+        except Exception as error:
+
+            results.append(
+                f"[OCR ERROR: {error}]"
+            )
+
+        progress.progress(
+            (index + 1) / total,
+            text=(
+                f"Reading question paper "
+                f"{index + 1}/{total}"
+            )
+        )
+
+    progress.empty()
+
+    return clean_text(
+        "\n".join(results)
+    )
+
+
+# ============================================================
+# QUESTION EXTRACTION
+# ============================================================
+
+def extract_questions(text):
+
+    text = clean_text(text)
+
+    if not text:
         return []
 
+    # Common examination numbering:
+    #
+    # 1.
+    # 1)
+    # 1:
+    # Q1.
+    # Q1)
+    # Question 1.
+    #
     pattern = re.compile(
         r"""
         (?=
-            (?:
-                ^|\n
-            )
-            \s*
-            (?:
-                Question\s*
-                |Q\s*
-            )?
-            (\d{1,3})
-            \s*
-            [\.\):\-]
-            \s*
+            ^|\n
         )
+        \s*
+        (?:
+            question\s*
+            |q\s*
+        )?
+        (\d{1,3})
+        \s*
+        [\.\):\-]
+        \s*
         """,
-        re.IGNORECASE
-        | re.VERBOSE
+        re.IGNORECASE | re.VERBOSE,
     )
 
     matches = list(
-        pattern.finditer(
-            question_text
-        )
+        pattern.finditer(text)
     )
-
-    questions = []
 
     if not matches:
 
         return [
             {
                 "number": 1,
-                "text": question_text
+                "text": text,
             }
         ]
 
-    for index, match in enumerate(
-        matches
-    ):
+    questions = []
+
+    for index, match in enumerate(matches):
 
         number = int(
             match.group(1)
@@ -478,11 +541,9 @@ def parse_questions(question_text):
 
         else:
 
-            end = len(
-                question_text
-            )
+            end = len(text)
 
-        body = question_text[
+        body = text[
             start:end
         ].strip()
 
@@ -491,7 +552,7 @@ def parse_questions(question_text):
             questions.append(
                 {
                     "number": number,
-                    "text": body
+                    "text": body,
                 }
             )
 
@@ -499,22 +560,10 @@ def parse_questions(question_text):
 
 
 # ============================================================
-# MARKING SCHEME PARSING
+# MARK EXTRACTION
 # ============================================================
 
-def parse_max_marks(text):
-
-    """
-    Attempts to extract marks from a question.
-
-    Examples:
-
-        [5 marks]
-        [5]
-        (5 marks)
-        5 marks
-        - 5 marks
-    """
+def extract_marks(text):
 
     patterns = [
 
@@ -522,7 +571,7 @@ def parse_max_marks(text):
 
         r"\(\s*(\d+(?:\.\d+)?)\s*marks?\s*\)",
 
-        r"(\d+(?:\.\d+)?)\s*marks?\b",
+        r"\b(\d+(?:\.\d+)?)\s*marks?\b",
 
     ]
 
@@ -531,7 +580,7 @@ def parse_max_marks(text):
         match = re.search(
             pattern,
             text,
-            re.IGNORECASE
+            re.IGNORECASE,
         )
 
         if match:
@@ -550,472 +599,292 @@ def parse_max_marks(text):
 
 
 # ============================================================
-# MARKING ENGINE
+# OPENAI CLIENT
 # ============================================================
 
-def get_openai_client():
+def get_api_key():
 
-    api_key = os.getenv(
-        "OPENAI_API_KEY"
-    )
-
-    if not api_key:
-
-        return None
-
+    # Streamlit Cloud secrets first.
     try:
 
-        from openai import OpenAI
+        if "OPENAI_API_KEY" in st.secrets:
 
-        return OpenAI(
-            api_key=api_key
-        )
+            return st.secrets[
+                "OPENAI_API_KEY"
+            ]
 
     except Exception:
 
-        return None
+        pass
+
+    # Local environment fallback.
+    return os.getenv(
+        "OPENAI_API_KEY"
+    )
 
 
-def build_marking_prompt(
-    question_text,
-    marking_scheme_text,
-    student_answer_text
+def get_marking_model():
+
+    try:
+
+        if "EXAMINA_MARKING_MODEL" in st.secrets:
+
+            return st.secrets[
+                "EXAMINA_MARKING_MODEL"
+            ]
+
+    except Exception:
+
+        pass
+
+    return os.getenv(
+        "EXAMINA_MARKING_MODEL",
+        DEFAULT_MARKING_MODEL,
+    )
+
+
+# ============================================================
+# AI MARKING
+# ============================================================
+
+def mark_exam(
+    question_paper,
+    marking_scheme,
+    student_answer,
 ):
 
-    return f"""
-You are the marking engine for Examina AI.
+    api_key = get_api_key()
 
-Your job is to mark a student's examination answer
-STRICTLY against the supplied marking scheme.
-
-Do not invent a marking scheme.
-
-Do not award marks merely because an answer sounds
-generally correct.
-
-Use the supplied marking scheme as the primary
-assessment criterion.
-
-A student's wording does not need to exactly match
-the marking scheme if the student's answer clearly
-expresses the same scientifically or academically
-valid idea.
-
-Do not penalize grammar unless grammar changes the
-meaning or the question explicitly assesses language.
-
-Return ONLY valid JSON.
-
-Required JSON structure:
-
-{{
-  "score": 0,
-  "maximum_marks": 0,
-  "percentage": 0,
-  "decision": "full",
-  "reason": "short explanation",
-  "matched_points": [
-      "..."
-  ],
-  "missing_points": [
-      "..."
-  ],
-  "feedback": "short constructive feedback"
-}}
-
-Allowed decision values:
-
-"full"
-"partial"
-"zero"
-
-QUESTION:
-
-{question_text}
-
-MARKING SCHEME:
-
-{marking_scheme_text}
-
-STUDENT ANSWER:
-
-{student_answer_text}
-"""
-
-
-def mark_single_question(
-    question_text,
-    marking_scheme_text,
-    student_answer_text,
-    maximum_marks=None
-):
-
-    client = get_openai_client()
-
-    if client is None:
+    if not api_key:
 
         raise RuntimeError(
             "OPENAI_API_KEY is not configured."
         )
 
-    prompt = build_marking_prompt(
-        question_text,
-        marking_scheme_text,
-        student_answer_text
+    from openai import OpenAI
+
+    client = OpenAI(
+        api_key=api_key
     )
 
-    if maximum_marks is None:
+    questions = extract_questions(
+        question_paper
+    )
 
-        maximum_marks = 0
+    if not questions:
+
+        raise RuntimeError(
+            "No questions could be identified "
+            "from the question paper."
+        )
+
+    # --------------------------------------------------------
+    # Build question information.
+    # --------------------------------------------------------
+
+    question_data = []
+
+    for question in questions:
+
+        question_data.append(
+            {
+                "number": question[
+                    "number"
+                ],
+                "question": question[
+                    "text"
+                ],
+                "maximum_marks": (
+                    extract_marks(
+                        question["text"]
+                    )
+                ),
+            }
+        )
+
+    payload = {
+
+        "question_paper": question_paper,
+
+        "questions": question_data,
+
+        "marking_scheme": marking_scheme,
+
+        "student_answer": student_answer,
+
+    }
+
+    prompt = f"""
+You are the examination marking engine for Examina AI.
+
+Your task is to mark the student's answers using ONLY
+the supplied examination question paper and marking scheme.
+
+IMPORTANT RULES:
+
+1. Do not invent marking criteria.
+2. The uploaded marking scheme is the primary authority.
+3. Equivalent wording should receive credit when it expresses
+   the same valid concept.
+4. Award partial marks when the marking scheme supports
+   partial credit.
+5. Do not award marks merely because an answer sounds plausible.
+6. Do not penalize grammar unless it changes the meaning.
+7. Do not give more marks than the maximum available.
+8. If the OCR appears ambiguous, identify the ambiguity.
+9. Give a short explanation for every score.
+10. Return ONLY valid JSON.
+
+For every question return:
+
+- question_number
+- question
+- maximum_marks
+- marks_awarded
+- decision
+- reason
+- matched_points
+- missing_points
+- feedback
+
+The decision must be one of:
+
+"full"
+"partial"
+"zero"
+
+Then return:
+
+- total_marks_awarded
+- total_marks_available
+- percentage
+- overall_feedback
+
+EXAMINATION DATA:
+
+{json.dumps(payload, ensure_ascii=False, indent=2)}
+"""
 
     response = client.responses.create(
-
-        model=os.getenv(
-            "EXAMINA_MARKING_MODEL",
-            "gpt-5.6-luna"
-        ),
-
-        input=prompt
+        model=get_marking_model(),
+        input=prompt,
     )
 
     raw = response.output_text
 
-    result = safe_json_loads(
-        raw
-    )
+    # --------------------------------------------------------
+    # Extract JSON safely.
+    # --------------------------------------------------------
 
-    if result is None:
+    try:
 
-        # Try extracting JSON if the model
-        # surrounded it with additional text.
+        result = json.loads(
+            raw
+        )
+
+    except Exception:
 
         match = re.search(
             r"\{.*\}",
             raw,
-            re.DOTALL
+            re.DOTALL,
         )
 
-        if match:
+        if not match:
 
-            result = safe_json_loads(
-                match.group(0)
+            raise RuntimeError(
+                "The marking model did not return valid JSON.\n\n"
+                + raw
             )
 
-    if result is None:
-
-        raise RuntimeError(
-            "Marking model returned invalid JSON."
-        )
-
-    # --------------------------------------------------------
-    # Enforce maximum marks
-    # --------------------------------------------------------
-
-    if maximum_marks:
-
-        result["maximum_marks"] = (
-            maximum_marks
-        )
-
-        try:
-
-            score = float(
-                result.get(
-                    "score",
-                    0
-                )
-            )
-
-            score = max(
-                0,
-                min(
-                    score,
-                    maximum_marks
-                )
-            )
-
-            result["score"] = score
-
-        except Exception:
-
-            result["score"] = 0
-
-    else:
-
-        try:
-
-            maximum_marks = float(
-                result.get(
-                    "maximum_marks",
-                    0
-                )
-            )
-
-        except Exception:
-
-            maximum_marks = 0
-
-    if maximum_marks:
-
-        result["percentage"] = round(
-            (
-                float(
-                    result.get(
-                        "score",
-                        0
-                    )
-                )
-                / maximum_marks
-            )
-            * 100,
-            2
+        result = json.loads(
+            match.group(0)
         )
 
     return result
 
 
 # ============================================================
-# MULTI-QUESTION MARKING
+# DISPLAY RESULTS
 # ============================================================
 
-def mark_exam(
-    question_text,
-    marking_scheme_text,
-    student_answer_text
-):
+def display_results(result):
 
-    questions = parse_questions(
-        question_text
+    st.header(
+        "Marking Result"
     )
 
-    if not questions:
-
-        raise RuntimeError(
-            "No questions could be extracted "
-            "from the question paper."
-        )
-
-    results = []
-
-    total_score = 0.0
-
-    total_marks = 0.0
-
-    # --------------------------------------------------------
-    # For the first prototype, we send the complete
-    # marking scheme and student answer to the marking
-    # engine for each extracted question.
-    #
-    # This makes the system tolerant of handwritten
-    # marking schemes whose exact formatting is unknown.
-    # --------------------------------------------------------
-
-    for question in questions:
-
-        question_number = (
-            question["number"]
-        )
-
-        question_body = (
-            question["text"]
-        )
-
-        maximum_marks = parse_max_marks(
-            question_body
-        )
-
-        result = mark_single_question(
-
-            question_text=(
-                question_body
-            ),
-
-            marking_scheme_text=(
-                marking_scheme_text
-            ),
-
-            student_answer_text=(
-                student_answer_text
-            ),
-
-            maximum_marks=maximum_marks
-        )
-
-        result["question_number"] = (
-            question_number
-        )
-
-        result["question"] = (
-            question_body
-        )
-
-        results.append(
-            result
-        )
-
-        try:
-
-            total_score += float(
-                result.get(
-                    "score",
-                    0
-                )
-            )
-
-        except Exception:
-
-            pass
-
-        if maximum_marks:
-
-            total_marks += (
-                maximum_marks
-            )
-
-        else:
-
-            try:
-
-                total_marks += float(
-                    result.get(
-                        "maximum_marks",
-                        0
-                    )
-                )
-
-            except Exception:
-
-                pass
-
-    percentage = 0
-
-    if total_marks > 0:
-
-        percentage = round(
-            (
-                total_score
-                / total_marks
-            )
-            * 100,
-            2
-        )
-
-    return {
-
-        "questions": results,
-
-        "total_score": total_score,
-
-        "total_marks": total_marks,
-
-        "percentage": percentage,
-
-    }
-
-
-# ============================================================
-# DISPLAY MARKING RESULTS
-# ============================================================
-
-def display_marking_results(
-    result
-):
-
-    st.success(
-        "Marking completed."
+    total = result.get(
+        "total_marks_awarded",
+        0,
     )
 
-    total_score = result.get(
-        "total_score",
-        0
-    )
-
-    total_marks = result.get(
-        "total_marks",
-        0
+    maximum = result.get(
+        "total_marks_available",
+        0,
     )
 
     percentage = result.get(
         "percentage",
-        0
+        0,
     )
-
-    # --------------------------------------------------------
-    # SUMMARY
-    # --------------------------------------------------------
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
 
         st.metric(
-            "Total Score",
-            f"{total_score:g}"
-            if isinstance(
-                total_score,
-                float
-            )
-            else total_score
+            "Score",
+            f"{total} / {maximum}",
         )
 
     with col2:
 
         st.metric(
-            "Maximum Marks",
-            f"{total_marks:g}"
-            if isinstance(
-                total_marks,
-                float
-            )
-            else total_marks
+            "Percentage",
+            f"{percentage}%",
         )
 
     with col3:
 
         st.metric(
-            "Percentage",
-            f"{percentage}%"
+            "Questions",
+            len(
+                result.get(
+                    "questions",
+                    []
+                )
+            ),
         )
 
     st.divider()
 
-    # --------------------------------------------------------
-    # QUESTION RESULTS
-    # --------------------------------------------------------
-
-    st.subheader(
-        "Question-by-Question Results"
-    )
-
-    for item in result.get(
+    questions = result.get(
         "questions",
         []
-    ):
+    )
+
+    for item in questions:
 
         number = item.get(
             "question_number",
-            "?"
+            "?",
         )
 
-        score = item.get(
-            "score",
-            0
+        marks = item.get(
+            "marks_awarded",
+            0,
         )
 
-        maximum = item.get(
+        maximum_marks = item.get(
             "maximum_marks",
-            0
-        )
-
-        decision = item.get(
-            "decision",
-            ""
+            0,
         )
 
         with st.expander(
             f"Question {number} — "
-            f"{score}/{maximum}",
-            expanded=True
+            f"{marks}/{maximum_marks}",
+            expanded=True,
         ):
 
             st.markdown(
@@ -1025,16 +894,19 @@ def display_marking_results(
             st.write(
                 item.get(
                     "question",
-                    ""
+                    "",
                 )
             )
 
             st.markdown(
-                "**Marking decision**"
+                "**Decision**"
             )
 
             st.write(
-                decision
+                item.get(
+                    "decision",
+                    "",
+                )
             )
 
             st.markdown(
@@ -1044,7 +916,7 @@ def display_marking_results(
             st.write(
                 item.get(
                     "reason",
-                    ""
+                    "",
                 )
             )
 
@@ -1056,7 +928,7 @@ def display_marking_results(
             if matched:
 
                 st.markdown(
-                    "**Matched marking points**"
+                    "**Points credited**"
                 )
 
                 for point in matched:
@@ -1082,23 +954,38 @@ def display_marking_results(
                         f"• {point}"
                     )
 
-            st.markdown(
-                "**Feedback**"
+            feedback = item.get(
+                "feedback",
+                "",
             )
 
-            st.info(
-                item.get(
-                    "feedback",
-                    ""
+            if feedback:
+
+                st.markdown(
+                    "**Feedback**"
                 )
-            )
 
-    # --------------------------------------------------------
-    # RAW JSON
-    # --------------------------------------------------------
+                st.info(
+                    feedback
+                )
+
+    overall = result.get(
+        "overall_feedback",
+        "",
+    )
+
+    if overall:
+
+        st.subheader(
+            "Overall Feedback"
+        )
+
+        st.info(
+            overall
+        )
 
     with st.expander(
-        "Show complete marking JSON"
+        "View raw marking JSON"
     ):
 
         st.json(
@@ -1107,105 +994,28 @@ def display_marking_results(
 
 
 # ============================================================
-# OCR REVIEW SECTION
-# ============================================================
-
-def editable_ocr_section():
-
-    st.header(
-        "4. Review OCR"
-    )
-
-    st.info(
-        "Check the extracted text carefully. "
-        "You can correct OCR mistakes before marking."
-    )
-
-    # --------------------------------------------------------
-    # QUESTION PAPER
-    # --------------------------------------------------------
-
-    st.subheader(
-        "📄 Question Paper"
-    )
-
-    st.session_state.question_ocr = (
-        st.text_area(
-            "Question paper OCR",
-            value=(
-                st.session_state.question_ocr
-            ),
-            height=300,
-            key="question_ocr_editor"
-        )
-    )
-
-    # --------------------------------------------------------
-    # MARKING SCHEME
-    # --------------------------------------------------------
-
-    st.subheader(
-        "✍️ Marking Scheme"
-    )
-
-    st.session_state.marking_scheme_ocr = (
-        st.text_area(
-            "Marking scheme OCR",
-            value=(
-                st.session_state.marking_scheme_ocr
-            ),
-            height=300,
-            key="scheme_ocr_editor"
-        )
-    )
-
-    # --------------------------------------------------------
-    # STUDENT ANSWER
-    # --------------------------------------------------------
-
-    st.subheader(
-        "📝 Student Answer"
-    )
-
-    st.session_state.student_answer_ocr = (
-        st.text_area(
-            "Student answer OCR",
-            value=(
-                st.session_state.student_answer_ocr
-            ),
-            height=300,
-            key="answer_ocr_editor"
-        )
-    )
-
-
-# ============================================================
 # MAIN APP
 # ============================================================
 
 def main():
-
-    # ========================================================
-    # HEADER
-    # ========================================================
 
     st.title(
         "📝 Examina AI"
     )
 
     st.subheader(
-        "Automated Examination Marking"
+        "Three-Document Examination Marking"
     )
 
     st.write(
-        "Upload a typed question paper, a handwritten "
-        "marking scheme, and a handwritten student answer."
+        "Upload the question paper, handwritten marking "
+        "scheme, and handwritten student answer."
     )
 
     st.divider()
 
     # ========================================================
-    # SYSTEM STATUS
+    # STATUS
     # ========================================================
 
     device = get_device()
@@ -1215,15 +1025,15 @@ def main():
     with col1:
 
         st.metric(
-            "OCR Device",
+            "Compute",
             device.upper()
         )
 
     with col2:
 
         st.metric(
-            "Question OCR",
-            "PaddleOCR"
+            "Printed OCR",
+            "TrOCR"
         )
 
     with col3:
@@ -1234,31 +1044,11 @@ def main():
         )
 
     # ========================================================
-    # API STATUS
-    # ========================================================
-
-    if os.getenv(
-        "OPENAI_API_KEY"
-    ):
-
-        st.success(
-            "Marking engine connected."
-        )
-
-    else:
-
-        st.warning(
-            "Marking engine is not configured. "
-            "Add OPENAI_API_KEY to your Streamlit secrets "
-            "before running the final marking step."
-        )
-
-    # ========================================================
-    # THREE UPLOADS
+    # UPLOADS
     # ========================================================
 
     st.header(
-        "1. Upload Examination Documents"
+        "1. Upload the three documents"
     )
 
     col1, col2, col3 = st.columns(3)
@@ -1279,20 +1069,16 @@ def main():
                 "png",
                 "jpg",
                 "jpeg",
-                "webp"
+                "webp",
             ],
-            key="question_upload"
+            key="question_file",
         )
 
         if question_file:
 
-            st.session_state.question_file_name = (
-                question_file.name
-            )
-
             st.image(
                 question_file,
-                use_container_width=True
+                use_container_width=True,
             )
 
     # --------------------------------------------------------
@@ -1311,20 +1097,16 @@ def main():
                 "png",
                 "jpg",
                 "jpeg",
-                "webp"
+                "webp",
             ],
-            key="scheme_upload"
+            key="scheme_file",
         )
 
         if scheme_file:
 
-            st.session_state.scheme_file_name = (
-                scheme_file.name
-            )
-
             st.image(
                 scheme_file,
-                use_container_width=True
+                use_container_width=True,
             )
 
     # --------------------------------------------------------
@@ -1343,42 +1125,38 @@ def main():
                 "png",
                 "jpg",
                 "jpeg",
-                "webp"
+                "webp",
             ],
-            key="answer_upload"
+            key="answer_file",
         )
 
         if answer_file:
 
-            st.session_state.answer_file_name = (
-                answer_file.name
-            )
-
             st.image(
                 answer_file,
-                use_container_width=True
+                use_container_width=True,
             )
 
     # ========================================================
-    # OCR BUTTON
+    # OCR
     # ========================================================
 
     st.header(
-        "2. Read Documents"
+        "2. Extract the text"
     )
 
-    run_ocr = st.button(
-        "🔍 Extract Text From All Documents",
+    ocr_button = st.button(
+        "🔍 Read All Three Documents",
         type="primary",
-        use_container_width=True
+        use_container_width=True,
     )
 
-    if run_ocr:
+    if ocr_button:
 
         if not question_file:
 
             st.error(
-                "Please upload the question paper."
+                "Upload the question paper first."
             )
 
             st.stop()
@@ -1386,7 +1164,7 @@ def main():
         if not scheme_file:
 
             st.error(
-                "Please upload the marking scheme."
+                "Upload the handwritten marking scheme."
             )
 
             st.stop()
@@ -1394,13 +1172,13 @@ def main():
         if not answer_file:
 
             st.error(
-                "Please upload the student answer."
+                "Upload the handwritten student answer."
             )
 
             st.stop()
 
         # ----------------------------------------------------
-        # QUESTION PAPER OCR
+        # QUESTION PAPER
         # ----------------------------------------------------
 
         with st.spinner(
@@ -1409,28 +1187,24 @@ def main():
 
             try:
 
-                question_text = (
-                    run_typed_ocr(
+                st.session_state.question_text = (
+                    typed_ocr(
                         question_file
                     )
                 )
 
-                st.session_state.question_ocr = (
-                    question_text
-                )
-
-            except Exception as e:
+            except Exception as error:
 
                 st.error(
-                    "Question paper OCR failed."
+                    "Typed question-paper OCR failed."
                 )
 
-                st.exception(e)
+                st.exception(error)
 
                 st.stop()
 
         # ----------------------------------------------------
-        # MARKING SCHEME OCR
+        # MARKING SCHEME
         # ----------------------------------------------------
 
         with st.spinner(
@@ -1439,28 +1213,24 @@ def main():
 
             try:
 
-                scheme_text = (
-                    run_handwriting_ocr(
+                st.session_state.scheme_text = (
+                    handwriting_ocr(
                         scheme_file
                     )
                 )
 
-                st.session_state.marking_scheme_ocr = (
-                    scheme_text
-                )
-
-            except Exception as e:
+            except Exception as error:
 
                 st.error(
-                    "Marking scheme OCR failed."
+                    "Marking-scheme OCR failed."
                 )
 
-                st.exception(e)
+                st.exception(error)
 
                 st.stop()
 
         # ----------------------------------------------------
-        # STUDENT ANSWER OCR
+        # STUDENT ANSWER
         # ----------------------------------------------------
 
         with st.spinner(
@@ -1469,136 +1239,186 @@ def main():
 
             try:
 
-                answer_text = (
-                    run_handwriting_ocr(
+                st.session_state.answer_text = (
+                    handwriting_ocr(
                         answer_file
                     )
                 )
 
-                st.session_state.student_answer_ocr = (
-                    answer_text
-                )
-
-            except Exception as e:
+            except Exception as error:
 
                 st.error(
-                    "Student answer OCR failed."
+                    "Student-answer OCR failed."
                 )
 
-                st.exception(e)
+                st.exception(error)
 
                 st.stop()
 
         st.success(
-            "All three documents have been read."
+            "All three documents have been processed."
         )
 
     # ========================================================
     # OCR REVIEW
     # ========================================================
 
-    if (
-        st.session_state.question_ocr
-        or
-        st.session_state.marking_scheme_ocr
-        or
-        st.session_state.student_answer_ocr
+    if any(
+        [
+            st.session_state.question_text,
+            st.session_state.scheme_text,
+            st.session_state.answer_text,
+        ]
     ):
 
-        editable_ocr_section()
-
-    # ========================================================
-    # MARK BUTTON
-    # ========================================================
-
-    st.header(
-        "5. Mark Examination"
-    )
-
-    ready = all(
-        [
-            st.session_state.question_ocr.strip(),
-            st.session_state.marking_scheme_ocr.strip(),
-            st.session_state.student_answer_ocr.strip()
-        ]
-    )
-
-    if not ready:
-
-        st.info(
-            "Complete OCR extraction and review the "
-            "three documents before marking."
+        st.header(
+            "3. Review and correct OCR"
         )
 
-    mark_button = st.button(
-        "🎯 Mark Student Answer",
-        type="primary",
-        use_container_width=True,
-        disabled=not ready
-    )
+        st.info(
+            "Correct any OCR mistakes here before marking. "
+            "The corrected text is what the marking engine uses."
+        )
 
-    if mark_button:
+        st.subheader(
+            "📄 Question Paper"
+        )
 
-        if not os.getenv(
-            "OPENAI_API_KEY"
-        ):
+        st.session_state.question_text = (
+            st.text_area(
+                "Question paper",
+                value=(
+                    st.session_state.question_text
+                ),
+                height=300,
+                key="question_editor",
+            )
+        )
 
-            st.error(
-                "OPENAI_API_KEY is missing. "
-                "Configure it in Streamlit Secrets."
+        st.subheader(
+            "✍️ Handwritten Marking Scheme"
+        )
+
+        st.session_state.scheme_text = (
+            st.text_area(
+                "Marking scheme",
+                value=(
+                    st.session_state.scheme_text
+                ),
+                height=300,
+                key="scheme_editor",
+            )
+        )
+
+        st.subheader(
+            "📝 Handwritten Student Answer"
+        )
+
+        st.session_state.answer_text = (
+            st.text_area(
+                "Student answer",
+                value=(
+                    st.session_state.answer_text
+                ),
+                height=300,
+                key="answer_editor",
+            )
+        )
+
+        # ====================================================
+        # MARKING
+        # ====================================================
+
+        st.header(
+            "4. Mark the examination"
+        )
+
+        api_key_available = bool(
+            get_api_key()
+        )
+
+        if not api_key_available:
+
+            st.warning(
+                "OPENAI_API_KEY has not been configured. "
+                "OCR will still work, but AI marking cannot "
+                "run until the API key is added."
             )
 
-            st.stop()
+        mark_button = st.button(
+            "🎯 Mark Student Answer",
+            type="primary",
+            use_container_width=True,
+            disabled=not api_key_available,
+        )
 
-        with st.spinner(
-            "Analyzing answers against the marking scheme..."
-        ):
+        if mark_button:
 
-            try:
-
-                result = mark_exam(
-
-                    question_text=(
-                        st.session_state.question_ocr
-                    ),
-
-                    marking_scheme_text=(
-                        st.session_state.marking_scheme_ocr
-                    ),
-
-                    student_answer_text=(
-                        st.session_state.student_answer_ocr
-                    )
-                )
-
-                st.session_state.marking_result = (
-                    result
-                )
-
-            except Exception as e:
+            if not st.session_state.question_text.strip():
 
                 st.error(
-                    "Marking failed."
+                    "Question paper text is empty."
                 )
-
-                st.exception(e)
 
                 st.stop()
 
+            if not st.session_state.scheme_text.strip():
+
+                st.error(
+                    "Marking scheme text is empty."
+                )
+
+                st.stop()
+
+            if not st.session_state.answer_text.strip():
+
+                st.error(
+                    "Student answer text is empty."
+                )
+
+                st.stop()
+
+            with st.spinner(
+                "Marking the examination..."
+            ):
+
+                try:
+
+                    result = mark_exam(
+
+                        question_paper=(
+                            st.session_state.question_text
+                        ),
+
+                        marking_scheme=(
+                            st.session_state.scheme_text
+                        ),
+
+                        student_answer=(
+                            st.session_state.answer_text
+                        ),
+                    )
+
+                    st.session_state.result = result
+
+                except Exception as error:
+
+                    st.error(
+                        "The marking engine failed."
+                    )
+
+                    st.exception(error)
+
     # ========================================================
-    # DISPLAY RESULTS
+    # RESULTS
     # ========================================================
 
-    if st.session_state.marking_result:
+    if st.session_state.result:
 
         st.divider()
 
-        st.header(
-            "6. Marking Result"
-        )
-
-        display_marking_results(
-            st.session_state.marking_result
+        display_results(
+            st.session_state.result
         )
 
     # ========================================================
@@ -1609,22 +1429,20 @@ def main():
 
     if st.button(
         "🔄 Start New Examination",
-        use_container_width=True
+        use_container_width=True,
     ):
 
-        for key in DEFAULT_STATE:
-
-            st.session_state[key] = (
-                DEFAULT_STATE[key]
-            )
+        st.session_state.question_text = ""
+        st.session_state.scheme_text = ""
+        st.session_state.answer_text = ""
+        st.session_state.result = None
 
         st.rerun()
 
 
 # ============================================================
-# RUN
+# START
 # ============================================================
 
 if __name__ == "__main__":
-
     main()
