@@ -1,6 +1,6 @@
 streamlit
 paddleocr
-paddlepaddle
+paddlepaddle==3.2.0
 torch
 torchvision
 transformers
@@ -8,6 +8,5 @@ huggingface_hub
 pillow
 numpy
 opencv-python-headless
-openai
 sentencepiece
 safetensors
