@@ -7,5 +7,7 @@ pillow
 numpy
 opencv-python-headless
 sentencepiece
+protobuf
 safetensors
 openai
+tokenizers
