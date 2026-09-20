@@ -1,0 +1,13 @@
+streamlit
+paddleocr
+paddlepaddle
+torch
+torchvision
+transformers
+huggingface_hub
+pillow
+numpy
+opencv-python-headless
+openai
+sentencepiece
+safetensors
