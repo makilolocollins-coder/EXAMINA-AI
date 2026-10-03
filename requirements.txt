@@ -1,3 +1,2 @@
 streamlit
-surya-ocr
 Pillow
