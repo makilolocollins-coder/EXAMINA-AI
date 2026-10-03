@@ -5,8 +5,10 @@ from transformers import AutoProcessor, AutoModelForImageTextToText
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# CONFIG
 # ============================================================
+
+MODEL_ID = "stepfun-ai/GOT-OCR-2.0-hf"
 
 st.set_page_config(
     page_title="Examina AI",
@@ -16,47 +18,37 @@ st.set_page_config(
 
 
 # ============================================================
-# MODEL CONFIGURATION
+# LOAD MODEL
 # ============================================================
 
-MODEL_ID = "stepfun-ai/GOT-OCR-2.0-hf"
-
-
-# ============================================================
-# LOAD GOT-OCR 2.0
-# ============================================================
-
-@st.cache_resource(show_spinner="Loading GOT-OCR 2.0...")
+@st.cache_resource
 def load_model():
 
-    # Detect available hardware
-    if torch.cuda.is_available():
-        device = "cuda"
-        dtype = torch.float16
-
-        model = AutoModelForImageTextToText.from_pretrained(
-            MODEL_ID,
-            torch_dtype=dtype,
-            device_map="auto",
-            low_cpu_mem_usage=True
-        )
-
-    else:
-        device = "cpu"
-        dtype = torch.float32
-
-        model = AutoModelForImageTextToText.from_pretrained(
-            MODEL_ID,
-            torch_dtype=dtype,
-            low_cpu_mem_usage=True
-        )
-
-        model.to("cpu")
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
     processor = AutoProcessor.from_pretrained(
         MODEL_ID,
         use_fast=True
     )
+
+    if device == "cuda":
+
+        model = AutoModelForImageTextToText.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float16,
+            device_map="auto",
+            low_cpu_mem_usage=True
+        )
+
+    else:
+
+        model = AutoModelForImageTextToText.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float32,
+            low_cpu_mem_usage=True
+        )
+
+        model.to("cpu")
 
     model.eval()
 
@@ -64,55 +56,65 @@ def load_model():
 
 
 # ============================================================
-# OCR FUNCTION
+# OCR
 # ============================================================
 
-def extract_text(image, processor, model, device):
+def perform_ocr(image, processor, model, device):
 
-    # Process the complete page.
-    # GOT-OCR can dynamically divide large pages into patches.
+    # Resize extremely large images to reduce memory usage
+    max_dimension = 2500
+
+    if max(image.size) > max_dimension:
+
+        ratio = max_dimension / max(image.size)
+
+        new_size = (
+            int(image.width * ratio),
+            int(image.height * ratio)
+        )
+
+        image = image.resize(
+            new_size,
+            Image.Resampling.LANCZOS
+        )
+
+    # Prepare image
     inputs = processor(
         image,
         return_tensors="pt",
-        format=False,
         crop_to_patches=True,
-        max_patches=3
+        max_patches=3,
+        format=False
     )
 
-    # Move tensors to the correct device
-    processed_inputs = {}
+    # Move tensors to device
+    for key in inputs:
 
-    for key, value in inputs.items():
+        if torch.is_tensor(inputs[key]):
+            inputs[key] = inputs[key].to(device)
 
-        if hasattr(value, "to"):
-            processed_inputs[key] = value.to(device)
-        else:
-            processed_inputs[key] = value
-
-    # Generate OCR result
+    # Generate
     with torch.inference_mode():
 
-        generated_ids = model.generate(
-            **processed_inputs,
+        output_ids = model.generate(
+            **inputs,
             do_sample=False,
-            tokenizer=processor.tokenizer,
-            stop_strings="<|im_end|>",
-            max_new_tokens=4096
+            max_new_tokens=2048
         )
 
-    # Remove input/prompt tokens from generated output
-    input_length = processed_inputs["input_ids"].shape[1]
+    # Decode
+    input_length = inputs["input_ids"].shape[1]
 
-    generated_text = processor.decode(
-        generated_ids[0][input_length:],
+    result = processor.decode(
+        output_ids[0][input_length:],
         skip_special_tokens=True
     )
 
-    return generated_text.strip()
+    return result.strip()
 
 
 # ============================================================
-# APPLICATION HEADER
+# HEADER
 # ============================================================
 
 st.title("📝 Examina AI")
@@ -120,13 +122,8 @@ st.title("📝 Examina AI")
 st.subheader("Whole-Page Handwritten OCR")
 
 st.write(
-    "Upload a handwritten examination page and Examina AI "
-    "will use GOT-OCR 2.0 to extract the written content."
-)
-
-st.info(
-    "For best results, use a clear, well-lit image of the "
-    "complete examination page."
+    "Upload a complete handwritten examination page "
+    "and extract the written text."
 )
 
 
@@ -134,71 +131,61 @@ st.info(
 # LOAD MODEL
 # ============================================================
 
-try:
+with st.spinner("Loading GOT-OCR 2.0..."):
 
-    processor, model, device = load_model()
+    try:
 
-    st.success(
-        f"GOT-OCR 2.0 is ready • Running on {device.upper()}"
-    )
+        processor, model, device = load_model()
 
-except Exception as error:
+        st.success(
+            f"Model loaded successfully on {device.upper()}"
+        )
 
-    st.error("GOT-OCR 2.0 could not be loaded.")
+    except Exception as e:
 
-    st.code(
-        str(error),
-        language="text"
-    )
+        st.error("Could not load GOT-OCR 2.0.")
 
-    st.stop()
+        st.exception(e)
+
+        st.stop()
 
 
 # ============================================================
-# FILE UPLOAD
+# UPLOAD
 # ============================================================
 
 uploaded_file = st.file_uploader(
-    "Upload a handwritten examination page",
-    type=[
-        "png",
-        "jpg",
-        "jpeg",
-        "webp"
-    ]
+    "Upload handwritten examination page",
+    type=["jpg", "jpeg", "png", "webp"]
 )
 
 
 # ============================================================
-# IMAGE PREVIEW
+# DISPLAY IMAGE
 # ============================================================
 
-if uploaded_file is not None:
+if uploaded_file:
 
     try:
 
         image = Image.open(uploaded_file).convert("RGB")
 
-        st.markdown("### Uploaded Examination Page")
-
         st.image(
             image,
-            caption="Handwritten examination page",
+            caption="Uploaded examination page",
             use_container_width=True
         )
 
-        st.caption(
-            f"Image dimensions: {image.width} × {image.height} pixels"
+        st.write(
+            f"Original image: "
+            f"{image.width} × {image.height} pixels"
         )
 
-    except Exception as error:
+    except Exception as e:
 
-        st.error("The uploaded image could not be opened.")
+        st.error("Could not open the image.")
 
-        st.code(
-            str(error),
-            language="text"
-        )
+        st.exception(e)
 
         st.stop()
 
@@ -208,57 +195,67 @@ if uploaded_file is not None:
     # ========================================================
 
     if st.button(
-        "🔍 Extract Handwriting",
+        "🔍 READ HANDWRITING",
         type="primary",
         use_container_width=True
     ):
 
-        with st.spinner(
-            "Reading the handwritten examination page..."
-        ):
+        progress = st.progress(0)
 
-            try:
+        status = st.empty()
 
-                result = extract_text(
-                    image,
-                    processor,
-                    model,
-                    device
+        try:
+
+            status.info("Preparing the examination page...")
+            progress.progress(20)
+
+            status.info(
+                "GOT-OCR 2.0 is analysing the handwritten page..."
+            )
+            progress.progress(40)
+
+            result = perform_ocr(
+                image,
+                processor,
+                model,
+                device
+            )
+
+            progress.progress(100)
+
+            status.success("OCR completed.")
+
+            st.markdown("## Extracted Text")
+
+            if result:
+
+                st.text_area(
+                    "Editable OCR Result",
+                    value=result,
+                    height=600
                 )
 
-                st.markdown("### Extracted Text")
-
-                if result:
-
-                    st.text_area(
-                        "OCR Result",
-                        value=result,
-                        height=600
-                    )
-
-                    st.download_button(
-                        "⬇️ Download Text",
-                        data=result,
-                        file_name="examina_ocr_result.txt",
-                        mime="text/plain",
-                        use_container_width=True
-                    )
-
-                else:
-
-                    st.warning(
-                        "No text was detected. "
-                        "Try uploading a clearer image."
-                    )
-
-            except Exception as error:
-
-                st.error("OCR processing failed.")
-
-                st.code(
-                    str(error),
-                    language="text"
+                st.download_button(
+                    "⬇️ Download Text",
+                    data=result,
+                    file_name="examina_handwriting.txt",
+                    mime="text/plain",
+                    use_container_width=True
                 )
+
+            else:
+
+                st.warning(
+                    "GOT-OCR did not return any text."
+                )
+
+        except Exception as e:
+
+            progress.empty()
+
+            status.error("OCR failed.")
+
+            st.exception(e)
 
 
 # ============================================================
@@ -268,5 +265,5 @@ if uploaded_file is not None:
 st.divider()
 
 st.caption(
-    "Examina AI | Whole-page OCR powered by GOT-OCR 2.0"
+    "Examina AI • GOT-OCR 2.0"
 )
