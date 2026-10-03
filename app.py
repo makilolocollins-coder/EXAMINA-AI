@@ -1,37 +1,47 @@
 import streamlit as st
-import torch
 from PIL import Image
+import torch
+
 from transformers import (
     TrOCRProcessor,
-    VisionEncoderDecoderModel
+    VisionEncoderDecoderModel,
 )
-from huggingface_hub import hf_hub_download
-
 
 # ============================================================
-# PAGE CONFIG
+# CONFIGURATION
 # ============================================================
+
+HANDWRITING_MODEL = "Makky07/Trocr"
 
 st.set_page_config(
-    page_title="Makky07 TrOCR Tester",
+    page_title="Makky07 TrOCR Handwriting Tester",
     page_icon="✍️",
-    layout="centered"
+    layout="wide",
 )
+
+# ============================================================
+# PAGE HEADER
+# ============================================================
 
 st.title("✍️ Makky07 TrOCR Handwriting Tester")
 
 st.write(
-    "Test the actual Makky07/Trocr handwritten OCR model."
+    "Upload a handwritten image and test the Makky07/Trocr "
+    "handwriting recognition model."
 )
 
+st.info(
+    "This app currently tests handwritten OCR only. "
+    "Typed-text OCR is not included here."
+)
 
 # ============================================================
-# MODEL SETTINGS
+# DEVICE
 # ============================================================
 
-MODEL_ID = "Makky07/Trocr"
-WEIGHT_FILE = "Trocr_model.bin"
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+st.caption(f"Running on: `{device}`")
 
 # ============================================================
 # LOAD MODEL
@@ -40,151 +50,157 @@ WEIGHT_FILE = "Trocr_model.bin"
 @st.cache_resource
 def load_model():
 
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # --------------------------------------------------------
-    # PROCESSOR
-    # --------------------------------------------------------
-
-    processor = TrOCRProcessor.from_pretrained(
-        MODEL_ID
-    )
-
-    # --------------------------------------------------------
-    # MODEL CONFIG
-    # --------------------------------------------------------
-
-    model = VisionEncoderDecoderModel.from_pretrained(
-        MODEL_ID,
-        weights_only=False
-    )
-
-    # --------------------------------------------------------
-    # DOWNLOAD ACTUAL WEIGHTS
-    # --------------------------------------------------------
-
-    weight_path = hf_hub_download(
-        repo_id=MODEL_ID,
-        filename=WEIGHT_FILE
-    )
-
-    # --------------------------------------------------------
-    # LOAD STATE DICT
-    # --------------------------------------------------------
-
-    checkpoint = torch.load(
-        weight_path,
-        map_location="cpu"
-    )
-
-    # Some checkpoints store the state dictionary directly.
-    # Others store it under a "state_dict" key.
-
-    if isinstance(checkpoint, dict) and "state_dict" in checkpoint:
-
-        state_dict = checkpoint["state_dict"]
-
-    else:
-
-        state_dict = checkpoint
-
-    # --------------------------------------------------------
-    # LOAD WEIGHTS
-    # --------------------------------------------------------
-
-    missing_keys, unexpected_keys = model.load_state_dict(
-        state_dict,
-        strict=False
-    )
-
-    # --------------------------------------------------------
-    # MOVE MODEL
-    # --------------------------------------------------------
-
-    model.to(device)
-    model.eval()
-
-    return (
-        processor,
-        model,
-        device,
-        missing_keys,
-        unexpected_keys
-    )
-
-
-# ============================================================
-# LOAD
-# ============================================================
-
-try:
-
-    with st.spinner(
-        "Downloading and loading Makky07/Trocr..."
-    ):
-
-        (
-            processor,
-            model,
-            device,
-            missing_keys,
-            unexpected_keys
-        ) = load_model()
-
-    st.success(
-        f"Model loaded successfully on {device.upper()}"
-    )
-
-    if missing_keys:
-
-        st.warning(
-            f"Missing keys: {len(missing_keys)}"
+    try:
+        # ----------------------------------------------------
+        # Processor
+        # ----------------------------------------------------
+        processor = TrOCRProcessor.from_pretrained(
+            HANDWRITING_MODEL
         )
 
-    if unexpected_keys:
-
-        st.warning(
-            f"Unexpected keys: {len(unexpected_keys)}"
+        # ----------------------------------------------------
+        # Model
+        #
+        # This requires the Hugging Face repository to contain
+        # either:
+        #
+        #   model.safetensors
+        #
+        # or:
+        #
+        #   pytorch_model.bin
+        # ----------------------------------------------------
+        model = VisionEncoderDecoderModel.from_pretrained(
+            HANDWRITING_MODEL
         )
 
+        model.to(device)
+        model.eval()
 
-except Exception as e:
+        return processor, model, None
 
-    st.error("Failed to load Makky07/Trocr.")
+    except Exception as e:
+        return None, None, str(e)
 
-    st.exception(e)
+
+processor, model, model_error = load_model()
+
+# ============================================================
+# MODEL STATUS
+# ============================================================
+
+if model_error:
+
+    st.error("❌ Failed to load the handwriting model.")
+
+    st.warning(
+        "The Hugging Face repository must contain the actual "
+        "model weights, such as `model.safetensors` or "
+        "`pytorch_model.bin`."
+    )
+
+    st.code(
+        model_error,
+        language="text"
+    )
+
+    st.markdown("### Required files")
+
+    st.code(
+        """Makky07/Trocr/
+├── config.json
+├── preprocessor_config.json
+├── tokenizer_config.json
+├── special_tokens_map.json
+├── tokenizer.json
+├── vocab.json
+├── merges.txt
+└── model.safetensors
+""",
+        language="text"
+    )
+
+    st.markdown(
+        "Once the model weights have been uploaded to "
+        "`Makky07/Trocr`, restart the Streamlit app."
+    )
 
     st.stop()
 
+# ============================================================
+# SUCCESS
+# ============================================================
+
+st.success("✅ Makky07/Trocr loaded successfully.")
 
 # ============================================================
 # IMAGE UPLOAD
 # ============================================================
 
-st.divider()
+st.subheader("Upload handwritten text")
 
 uploaded_file = st.file_uploader(
-    "Upload a handwritten image",
+    "Choose an image",
     type=[
         "png",
         "jpg",
         "jpeg",
-        "webp"
-    ]
+        "webp",
+        "bmp",
+    ],
 )
+
+# ============================================================
+# OCR FUNCTION
+# ============================================================
+
+def recognize_handwriting(image):
+
+    # Convert image to RGB
+    image = image.convert("RGB")
+
+    # Process image
+    pixel_values = processor(
+        images=image,
+        return_tensors="pt"
+    ).pixel_values
+
+    pixel_values = pixel_values.to(device)
+
+    # --------------------------------------------------------
+    # Generate prediction
+    # --------------------------------------------------------
+
+    with torch.no_grad():
+
+        generated_ids = model.generate(
+            pixel_values,
+            max_new_tokens=256,
+            num_beams=4,
+            early_stopping=True,
+        )
+
+    # --------------------------------------------------------
+    # Decode
+    # --------------------------------------------------------
+
+    generated_text = processor.batch_decode(
+        generated_ids,
+        skip_special_tokens=True
+    )[0]
+
+    return generated_text.strip()
 
 
 # ============================================================
-# OCR
+# RUN OCR
 # ============================================================
 
 if uploaded_file is not None:
 
-    image = Image.open(
-        uploaded_file
-    ).convert("RGB")
+    image = Image.open(uploaded_file)
 
-    st.subheader("Uploaded Image")
+    st.subheader("Uploaded image")
 
     st.image(
         image,
@@ -196,107 +212,74 @@ if uploaded_file is not None:
 
     if st.button(
         "🔍 Recognize Handwriting",
-        type="primary"
+        type="primary",
+        use_container_width=True
     ):
 
-        with st.spinner(
-            "Recognizing handwriting..."
-        ):
+        with st.spinner("Reading handwriting..."):
 
             try:
 
-                # ------------------------------------------------
-                # PREPROCESS
-                # ------------------------------------------------
+                result = recognize_handwriting(image)
 
-                pixel_values = processor(
-                    images=image,
-                    return_tensors="pt"
-                ).pixel_values
+                st.subheader("OCR Result")
 
-                pixel_values = pixel_values.to(
-                    device
-                )
+                if result:
 
-                # ------------------------------------------------
-                # GENERATE
-                # ------------------------------------------------
-
-                with torch.no_grad():
-
-                    generated_ids = model.generate(
-                        pixel_values,
-                        max_new_tokens=100,
-                        num_beams=4,
-                        early_stopping=True
+                    st.text_area(
+                        "Recognized text",
+                        value=result,
+                        height=200,
                     )
 
-                # ------------------------------------------------
-                # DECODE
-                # ------------------------------------------------
+                    st.success(
+                        "✅ Handwriting recognition completed."
+                    )
 
-                recognized_text = processor.batch_decode(
-                    generated_ids,
-                    skip_special_tokens=True
-                )[0]
+                else:
 
-                # ------------------------------------------------
-                # RESULT
-                # ------------------------------------------------
-
-                st.subheader(
-                    "📝 Recognized Text"
-                )
-
-                st.text_area(
-                    "OCR output",
-                    recognized_text,
-                    height=180
-                )
+                    st.warning(
+                        "The model did not return any text."
+                    )
 
             except Exception as e:
 
                 st.error(
-                    "OCR recognition failed."
+                    "❌ An error occurred while running OCR."
                 )
 
                 st.exception(e)
-
 
 # ============================================================
 # MODEL INFORMATION
 # ============================================================
 
-with st.expander(
-    "🔧 Model information"
-):
+with st.expander("Model information"):
 
     st.write(
-        "**Hugging Face model:** "
-        "`Makky07/Trocr`"
+        f"**Hugging Face model:** `{HANDWRITING_MODEL}`"
     )
 
     st.write(
-        "**Task:** Handwritten image → text"
+        f"**Device:** `{device}`"
     )
 
     st.write(
-        "**Architecture:** VisionEncoderDecoderModel"
+        "**Purpose:** Handwritten text recognition"
     )
 
     st.write(
-        "**Encoder:** ViT"
+        "**Architecture:** TrOCR / VisionEncoderDecoderModel"
     )
 
-    st.write(
-        "**Input:** 384 × 384"
-    )
+# ============================================================
+# FOOTER
+# ============================================================
 
-    st.write(
-        "**Device:** "
-        + device
-    )
+st.divider()
 
-    st.write(
-        "**Weights:** `Trocr_model.bin`"
-    )
+st.caption(
+    "Makky07 TrOCR Handwriting Tester"
+)
+
+#This is  repository, this same app should be able to load them.
