@@ -1,146 +1,112 @@
 import streamlit as st
-from PIL import Image
 import torch
+from PIL import Image
+from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 
-from transformers import (
-    TrOCRProcessor,
-    VisionEncoderDecoderModel,
-)
 
 # ============================================================
-# CONFIGURATION
+# CONFIG
 # ============================================================
 
-HANDWRITING_MODEL = "Makky07/Trocr"
+HANDWRITING_MODEL = "microsoft/trocr-base-handwritten"
+
 
 st.set_page_config(
-    page_title="Makky07 TrOCR Handwriting Tester",
+    page_title="Examina AI - Handwriting OCR",
     page_icon="✍️",
     layout="wide",
 )
 
+
 # ============================================================
-# PAGE HEADER
+# PAGE
 # ============================================================
 
-st.title("✍️ Makky07 TrOCR Handwriting Tester")
+st.title("✍️ Examina AI")
+st.subheader("Handwritten Answer OCR Tester")
 
 st.write(
-    "Upload a handwritten image and test the Makky07/Trocr "
-    "handwriting recognition model."
+    "Upload a clear image containing handwritten text. "
+    "The app will use Microsoft's TrOCR handwritten model "
+    "to convert the handwriting into digital text."
 )
 
 st.info(
-    "This app currently tests handwritten OCR only. "
-    "Typed-text OCR is not included here."
+    "For best results, upload one handwritten text line or "
+    "a small cropped section of an answer sheet."
 )
+
 
 # ============================================================
 # DEVICE
 # ============================================================
 
-device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+device = torch.device(
+    "cuda" if torch.cuda.is_available() else "cpu"
+)
 
-st.caption(f"Running on: `{device}`")
+st.caption(f"Device: `{device}`")
+
 
 # ============================================================
 # LOAD MODEL
 # ============================================================
 
 @st.cache_resource
-def load_model():
+def load_trocr():
 
-    try:
-        # ----------------------------------------------------
-        # Processor
-        # ----------------------------------------------------
-        processor = TrOCRProcessor.from_pretrained(
-            HANDWRITING_MODEL
-        )
+    processor = TrOCRProcessor.from_pretrained(
+        HANDWRITING_MODEL
+    )
 
-        # ----------------------------------------------------
-        # Model
-        #
-        # This requires the Hugging Face repository to contain
-        # either:
-        #
-        #   model.safetensors
-        #
-        # or:
-        #
-        #   pytorch_model.bin
-        # ----------------------------------------------------
-        model = VisionEncoderDecoderModel.from_pretrained(
-            HANDWRITING_MODEL
-        )
+    model = VisionEncoderDecoderModel.from_pretrained(
+        HANDWRITING_MODEL
+    )
 
-        model.to(device)
-        model.eval()
+    model.to(device)
+    model.eval()
 
-        return processor, model, None
+    return processor, model
 
-    except Exception as e:
-        return None, None, str(e)
-
-
-processor, model, model_error = load_model()
 
 # ============================================================
-# MODEL STATUS
+# LOAD MODEL WITH ERROR HANDLING
 # ============================================================
 
-if model_error:
+try:
 
-    st.error("❌ Failed to load the handwriting model.")
+    with st.spinner(
+        "Loading handwritten OCR model from Hugging Face..."
+    ):
 
-    st.warning(
-        "The Hugging Face repository must contain the actual "
-        "model weights, such as `model.safetensors` or "
-        "`pytorch_model.bin`."
+        processor, model = load_trocr()
+
+    st.success(
+        "✅ Handwriting OCR model loaded successfully."
     )
 
-    st.code(
-        model_error,
-        language="text"
+except Exception as e:
+
+    st.error("❌ Could not load the handwriting model.")
+
+    st.write(
+        "The app could not download or initialize "
+        "Microsoft TrOCR."
     )
 
-    st.markdown("### Required files")
-
-    st.code(
-        """Makky07/Trocr/
-├── config.json
-├── preprocessor_config.json
-├── tokenizer_config.json
-├── special_tokens_map.json
-├── tokenizer.json
-├── vocab.json
-├── merges.txt
-└── model.safetensors
-""",
-        language="text"
-    )
-
-    st.markdown(
-        "Once the model weights have been uploaded to "
-        "`Makky07/Trocr`, restart the Streamlit app."
-    )
+    st.exception(e)
 
     st.stop()
 
-# ============================================================
-# SUCCESS
-# ============================================================
-
-st.success("✅ Makky07/Trocr loaded successfully.")
 
 # ============================================================
 # IMAGE UPLOAD
 # ============================================================
 
-st.subheader("Upload handwritten text")
+st.divider()
 
 uploaded_file = st.file_uploader(
-    "Choose an image",
+    "Upload handwritten text",
     type=[
         "png",
         "jpg",
@@ -149,6 +115,7 @@ uploaded_file = st.file_uploader(
         "bmp",
     ],
 )
+
 
 # ============================================================
 # OCR FUNCTION
@@ -167,23 +134,17 @@ def recognize_handwriting(image):
 
     pixel_values = pixel_values.to(device)
 
-    # --------------------------------------------------------
-    # Generate prediction
-    # --------------------------------------------------------
-
+    # Generate text
     with torch.no_grad():
 
         generated_ids = model.generate(
             pixel_values,
-            max_new_tokens=256,
+            max_new_tokens=128,
             num_beams=4,
             early_stopping=True,
         )
 
-    # --------------------------------------------------------
     # Decode
-    # --------------------------------------------------------
-
     generated_text = processor.batch_decode(
         generated_ids,
         skip_special_tokens=True
@@ -193,75 +154,81 @@ def recognize_handwriting(image):
 
 
 # ============================================================
-# RUN OCR
+# DISPLAY IMAGE
 # ============================================================
 
 if uploaded_file is not None:
 
     image = Image.open(uploaded_file)
 
-    st.subheader("Uploaded image")
+    st.subheader("Uploaded handwriting")
 
     st.image(
         image,
-        caption="Handwritten input",
+        caption="Input image",
         use_container_width=True
     )
 
     st.divider()
 
+    # ========================================================
+    # OCR BUTTON
+    # ========================================================
+
     if st.button(
         "🔍 Recognize Handwriting",
         type="primary",
-        use_container_width=True
+        use_container_width=True,
     ):
 
-        with st.spinner("Reading handwriting..."):
+        try:
 
-            try:
+            with st.spinner(
+                "Reading handwriting..."
+            ):
 
                 result = recognize_handwriting(image)
 
-                st.subheader("OCR Result")
+            st.subheader("Recognized Text")
 
-                if result:
+            if result:
 
-                    st.text_area(
-                        "Recognized text",
-                        value=result,
-                        height=200,
-                    )
-
-                    st.success(
-                        "✅ Handwriting recognition completed."
-                    )
-
-                else:
-
-                    st.warning(
-                        "The model did not return any text."
-                    )
-
-            except Exception as e:
-
-                st.error(
-                    "❌ An error occurred while running OCR."
+                st.text_area(
+                    "OCR output",
+                    value=result,
+                    height=200,
                 )
 
-                st.exception(e)
+                st.success(
+                    "✅ Handwriting recognition completed."
+                )
+
+            else:
+
+                st.warning(
+                    "The model did not return any text."
+                )
+
+        except Exception as e:
+
+            st.error(
+                "❌ OCR failed."
+            )
+
+            st.exception(e)
+
 
 # ============================================================
 # MODEL INFORMATION
 # ============================================================
 
+st.divider()
+
 with st.expander("Model information"):
 
     st.write(
-        f"**Hugging Face model:** `{HANDWRITING_MODEL}`"
-    )
-
-    st.write(
-        f"**Device:** `{device}`"
+        "**Model:** "
+        "`microsoft/trocr-base-handwritten`"
     )
 
     st.write(
@@ -272,6 +239,28 @@ with st.expander("Model information"):
         "**Architecture:** TrOCR / VisionEncoderDecoderModel"
     )
 
+    st.write(
+        "**Source:** Hugging Face"
+    )
+
+    st.write(
+        "**Device:** "
+        f"`{device}`"
+    )
+
+
+# ============================================================
+# IMPORTANT NOTE
+# ============================================================
+
+st.warning(
+    "TrOCR works best with individual handwritten text lines. "
+    "For full exam sheets, the next version should detect and "
+    "crop individual handwriting lines before sending them to "
+    "TrOCR."
+)
+
+
 # ============================================================
 # FOOTER
 # ============================================================
@@ -279,7 +268,5 @@ with st.expander("Model information"):
 st.divider()
 
 st.caption(
-    "Makky07 TrOCR Handwriting Tester"
+    "Examina AI • Handwritten Answer OCR"
 )
-
-#This is  repository, this same app should be able to load them.
