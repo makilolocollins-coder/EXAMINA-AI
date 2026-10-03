@@ -1,3 +1,4 @@
 streamlit
 surya-ocr
 Pillow
+llama.cpp
