@@ -1,81 +1,137 @@
 import streamlit as st
+import torch
 from PIL import Image
-from surya.inference import SuryaInferenceManager
-from surya.recognition import RecognitionPredictor
+from transformers import AutoProcessor, AutoModelForImageTextToText
 
 
 # ============================================================
-# PAGE CONFIGURATION
+# CONFIGURATION
 # ============================================================
+
+MODEL_ID = "stepfun-ai/GOT-OCR-2.0-hf"
 
 st.set_page_config(
     page_title="Examina AI - Handwritten OCR",
-    page_icon="✍️",
-    layout="wide",
+    page_icon="📝",
+    layout="wide"
 )
 
 
 # ============================================================
-# TITLE
-# ============================================================
-
-st.title("✍️ Examina AI")
-
-st.subheader("Full-Page Handwritten Answer OCR")
-
-st.write(
-    "Upload a complete handwritten exam page and Surya OCR 2 "
-    "will attempt to recognize the handwriting, preserve the "
-    "reading order, and separate the page into text blocks."
-)
-
-st.info(
-    "For the best results, upload a clear, well-lit photograph "
-    "or scan of one complete exam page."
-)
-
-
-# ============================================================
-# LOAD SURYA
+# LOAD MODEL
 # ============================================================
 
 @st.cache_resource
-def load_surya():
+def load_model():
 
-    # Surya automatically manages the OCR inference backend.
-    manager = SuryaInferenceManager()
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    recognizer = RecognitionPredictor(manager)
+    st.info(f"Loading GOT-OCR 2.0 on {device.upper()}...")
 
-    return manager, recognizer
+    processor = AutoProcessor.from_pretrained(
+        MODEL_ID,
+        use_fast=True
+    )
+
+    if device == "cuda":
+
+        model = AutoModelForImageTextToText.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float16,
+            device_map="auto"
+        )
+
+    else:
+
+        model = AutoModelForImageTextToText.from_pretrained(
+            MODEL_ID,
+            torch_dtype=torch.float32,
+            low_cpu_mem_usage=True
+        )
+
+        model.to(device)
+
+    model.eval()
+
+    return processor, model, device
 
 
 # ============================================================
-# MODEL INITIALIZATION
+# OCR FUNCTION
+# ============================================================
+
+def run_ocr(image, processor, model, device):
+
+    # GOT-OCR supports dynamic image patching.
+    # This is useful for full exam pages.
+    inputs = processor(
+        image,
+        return_tensors="pt",
+        format=False,
+        crop_to_patches=True,
+        max_patches=3
+    )
+
+    # Move tensors to the model device
+    inputs = {
+        key: value.to(device) if hasattr(value, "to") else value
+        for key, value in inputs.items()
+    }
+
+    with torch.inference_mode():
+
+        generated_ids = model.generate(
+            **inputs,
+            do_sample=False,
+            tokenizer=processor.tokenizer,
+            stop_strings="<|im_end|>",
+            max_new_tokens=4096
+        )
+
+    # Remove the prompt tokens
+    input_length = inputs["input_ids"].shape[1]
+
+    output = processor.decode(
+        generated_ids[0][input_length:],
+        skip_special_tokens=True
+    )
+
+    return output.strip()
+
+
+# ============================================================
+# USER INTERFACE
+# ============================================================
+
+st.title("📝 Examina AI")
+st.subheader("Whole-Page Handwritten OCR")
+
+st.write(
+    "Upload a handwritten examination page and GOT-OCR 2.0 "
+    "will attempt to convert the handwriting into editable text."
+)
+
+st.warning(
+    "For best results, upload a clear, well-lit image with the "
+    "entire examination page visible."
+)
+
+
+# ============================================================
+# MODEL
 # ============================================================
 
 try:
 
-    with st.spinner(
-        "Loading Surya OCR 2..."
-    ):
-
-        manager, recognizer = load_surya()
+    processor, model, device = load_model()
 
     st.success(
-        "✅ Surya OCR 2 is ready."
+        f"GOT-OCR 2.0 loaded successfully on {device.upper()}."
     )
 
 except Exception as e:
 
-    st.error(
-        "❌ Surya OCR could not be initialized."
-    )
-
-    st.write(
-        "This usually means that the Surya package or its "
-        "inference backend could not be installed or started."
-    )
+    st.error("Failed to load GOT-OCR 2.0.")
 
     st.exception(e)
 
@@ -83,347 +139,83 @@ except Exception as e:
 
 
 # ============================================================
-# FILE UPLOAD
+# IMAGE UPLOAD
 # ============================================================
 
-st.divider()
-
 uploaded_file = st.file_uploader(
-    "Upload a handwritten exam page",
-    type=[
-        "png",
-        "jpg",
-        "jpeg",
-        "webp",
-        "bmp",
-    ],
+    "Upload handwritten exam page",
+    type=["png", "jpg", "jpeg", "webp"]
 )
 
 
 # ============================================================
-# OCR FUNCTION
-# ============================================================
-
-def run_full_page_ocr(image):
-
-    # Surya expects a PIL image.
-    image = image.convert("RGB")
-
-    # --------------------------------------------------------
-    # Full-page OCR
-    #
-    # No manual line cropping is required here.
-    # Surya OCR 2 performs full-page recognition.
-    # --------------------------------------------------------
-
-    results = recognizer(
-        [image],
-        full_page=True
-    )
-
-    return results[0]
-
-
-# ============================================================
-# DISPLAY UPLOADED IMAGE
+# PROCESS IMAGE
 # ============================================================
 
 if uploaded_file is not None:
 
-    image = Image.open(uploaded_file)
+    image = Image.open(uploaded_file).convert("RGB")
 
-    # --------------------------------------------------------
-    # IMAGE INFORMATION
-    # --------------------------------------------------------
-
-    width, height = image.size
-
-    st.subheader("Uploaded page")
-
-    st.caption(
-        f"Image size: {width} × {height} pixels"
-    )
+    st.markdown("### Uploaded Page")
 
     st.image(
         image,
-        caption="Handwritten exam page",
+        caption="Handwritten examination page",
         use_container_width=True
     )
 
-    st.divider()
-
-    # --------------------------------------------------------
-    # OCR BUTTON
-    # --------------------------------------------------------
+    st.write(
+        f"Image size: {image.width} × {image.height} pixels"
+    )
 
     if st.button(
-        "🔍 Read Entire Page",
+        "🔍 Extract Handwriting",
         type="primary",
-        use_container_width=True,
+        use_container_width=True
     ):
 
-        try:
+        with st.spinner(
+            "Reading the handwritten page... This may take some time."
+        ):
 
-            with st.spinner(
-                "Reading the handwritten page..."
-            ):
+            try:
 
-                page_result = run_full_page_ocr(image)
-
-            st.success(
-                "✅ Page processing completed."
-            )
-
-            # ==================================================
-            # RESULTS
-            # ==================================================
-
-            st.subheader("Recognized Answer")
-
-            blocks = getattr(
-                page_result,
-                "blocks",
-                []
-            )
-
-            if not blocks:
-
-                st.warning(
-                    "No readable text blocks were detected."
+                result = run_ocr(
+                    image,
+                    processor,
+                    model,
+                    device
                 )
 
-            else:
+                st.markdown("### Extracted Text")
 
-                # ------------------------------------------------
-                # Sort blocks by reading order
-                # ------------------------------------------------
-
-                blocks = sorted(
-                    blocks,
-                    key=lambda block: getattr(
-                        block,
-                        "reading_order",
-                        0
-                    )
-                )
-
-                recognized_parts = []
-
-                for block in blocks:
-
-                    # --------------------------------------------
-                    # Get text
-                    # --------------------------------------------
-
-                    text = getattr(
-                        block,
-                        "html",
-                        ""
-                    )
-
-                    if text is None:
-                        text = ""
-
-                    text = str(text).strip()
-
-                    if not text:
-                        continue
-
-                    recognized_parts.append(
-                        text
-                    )
-
-                # ------------------------------------------------
-                # Combine blocks
-                # ------------------------------------------------
-
-                final_text = "\n\n".join(
-                    recognized_parts
-                )
-
-                if final_text:
+                if result:
 
                     st.text_area(
-                        "OCR output",
-                        value=final_text,
-                        height=450,
+                        "OCR Result",
+                        value=result,
+                        height=500
                     )
 
-                    st.success(
-                        f"✅ Recognized "
-                        f"{len(recognized_parts)} text blocks."
+                    st.download_button(
+                        label="⬇️ Download OCR Text",
+                        data=result,
+                        file_name="examina_ocr_result.txt",
+                        mime="text/plain",
+                        use_container_width=True
                     )
 
                 else:
 
                     st.warning(
-                        "Surya detected page content, "
-                        "but no readable text was returned."
+                        "No text was detected. Try a clearer image."
                     )
 
-            # ==================================================
-            # BLOCK DETAILS
-            # ==================================================
+            except Exception as e:
 
-            if blocks:
+                st.error("OCR processing failed.")
 
-                st.divider()
-
-                with st.expander(
-                    "View detected page blocks"
-                ):
-
-                    for index, block in enumerate(
-                        blocks,
-                        start=1
-                    ):
-
-                        label = getattr(
-                            block,
-                            "label",
-                            "Unknown"
-                        )
-
-                        confidence = getattr(
-                            block,
-                            "confidence",
-                            None
-                        )
-
-                        block_text = getattr(
-                            block,
-                            "html",
-                            ""
-                        )
-
-                        if block_text is None:
-                            block_text = ""
-
-                        block_text = str(
-                            block_text
-                        ).strip()
-
-                        st.markdown(
-                            f"### Block {index}"
-                        )
-
-                        st.write(
-                            f"**Type:** {label}"
-                        )
-
-                        if confidence is not None:
-
-                            try:
-
-                                st.write(
-                                    f"**Confidence:** "
-                                    f"{float(confidence):.3f}"
-                                )
-
-                            except Exception:
-
-                                pass
-
-                        if block_text:
-
-                            st.code(
-                                block_text,
-                                language="text"
-                            )
-
-            # ==================================================
-            # RAW RESULT
-            # ==================================================
-
-            with st.expander(
-                "View raw Surya result"
-            ):
-
-                try:
-
-                    st.json(
-                        page_result.model_dump()
-                    )
-
-                except Exception:
-
-                    st.write(
-                        page_result
-                    )
-
-        except Exception as e:
-
-            st.error(
-                "❌ Full-page OCR failed."
-            )
-
-            st.exception(e)
-
-
-# ============================================================
-# INFORMATION
-# ============================================================
-
-st.divider()
-
-with st.expander(
-    "About this OCR system"
-):
-
-    st.write(
-        "**OCR engine:** Surya OCR 2"
-    )
-
-    st.write(
-        "**Mode:** Full-page OCR"
-    )
-
-    st.write(
-        "**Input:** Complete handwritten exam page"
-    )
-
-    st.write(
-        "**Output:** Recognized text blocks in reading order"
-    )
-
-    st.write(
-        "**Model source:** Datalab / Surya OCR 2"
-    )
-
-
-# ============================================================
-# EXAMINA AI PIPELINE
-# ============================================================
-
-with st.expander(
-    "Examina AI processing pipeline"
-):
-
-    st.markdown(
-        """
-        **Step 1 — Student uploads answer**
-
-        ↓
-
-        **Step 2 — Surya OCR 2 reads the complete page**
-
-        ↓
-
-        **Step 3 — Text blocks are reconstructed in reading order**
-
-        ↓
-
-        **Step 4 — Recognized answer is prepared for marking**
-
-        ↓
-
-        **Step 5 — Marking scheme is compared with the answer**
-
-        ↓
-
-        **Step 6 — Score and feedback are generated**
-        """
-    )
+                st.exception(e)
 
 
 # ============================================================
@@ -433,5 +225,5 @@ with st.expander(
 st.divider()
 
 st.caption(
-    "Examina AI • Full-Page Handwritten OCR"
+    "Examina AI • Handwritten OCR powered by GOT-OCR 2.0"
 )
