@@ -1,8 +1,8 @@
 streamlit
-torch==2.7.1
-transformers>=5.9.0
+torch
+torchvision
+transformers>=4.57.1
 accelerate
-Pillow
+Pillow==11.2.1
 sentencepiece
-tiktoken
 safetensors
