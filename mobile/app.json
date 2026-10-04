@@ -1,0 +1,27 @@
+{
+  "expo": {
+    "name": "Examina AI",
+    "slug": "examina-ai",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "android": {
+      "package": "com.examinaai.app"
+    },
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Examina AI to access your camera."
+        }
+      ],
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "Allow Examina AI to access your photos."
+        }
+      ]
+    ]
+  }
+}
