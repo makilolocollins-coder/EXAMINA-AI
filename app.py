@@ -1,152 +1,225 @@
 import streamlit as st
 import torch
 from PIL import Image
-from transformers import AutoProcessor, AutoModelForImageTextToText
+from transformers import AutoProcessor, PaddleOCRVLForConditionalGeneration
 
-MODEL_ID = "stepfun-ai/GOT-OCR-2.0-hf"
+# ============================================================
+# PAGE CONFIG
+# ============================================================
 
 st.set_page_config(
-    page_title="Examina AI OCR Test",
-    page_icon="📝"
+    page_title="PaddleOCR-VL Handwriting Tester",
+    page_icon="📝",
+    layout="wide"
 )
 
-st.title("📝 Examina AI")
-st.write("GOT-OCR 2.0 diagnostic test")
+st.title("📝 PaddleOCR-VL Handwritten English OCR")
+st.write(
+    "Upload a handwritten examination page and test how well "
+    "PaddleOCR-VL can transcribe it."
+)
+
+# ============================================================
+# MODEL
+# ============================================================
+
+MODEL_ID = "PaddlePaddle/PaddleOCR-VL"
 
 
 @st.cache_resource
-def load_got():
-
-    st.write("1. Loading processor...")
+def load_model():
 
     processor = AutoProcessor.from_pretrained(
         MODEL_ID
     )
 
-    st.write("✅ Processor loaded")
-
-    st.write("2. Loading model...")
-
-    model = AutoModelForImageTextToText.from_pretrained(
-        MODEL_ID,
-        torch_dtype=torch.float32,
-        low_cpu_mem_usage=True
-    )
-
-    st.write("✅ Model loaded")
+    if torch.cuda.is_available():
+        model = PaddleOCRVLForConditionalGeneration.from_pretrained(
+            MODEL_ID,
+            dtype=torch.bfloat16,
+            device_map="auto"
+        )
+    else:
+        model = PaddleOCRVLForConditionalGeneration.from_pretrained(
+            MODEL_ID,
+            dtype=torch.float32
+        )
 
     model.eval()
 
     return processor, model
 
 
-try:
+# ============================================================
+# MODEL STATUS
+# ============================================================
 
-    processor, model = load_got()
+with st.spinner("Loading PaddleOCR-VL..."):
 
-    st.success("GOT-OCR 2.0 is loaded successfully.")
+    try:
+        processor, model = load_model()
 
-except Exception as e:
+        st.success("PaddleOCR-VL loaded successfully.")
 
-    st.error("MODEL LOADING FAILED")
+        if torch.cuda.is_available():
+            st.info(
+                f"GPU detected: {torch.cuda.get_device_name(0)}"
+            )
+        else:
+            st.warning(
+                "No GPU detected. OCR may be very slow."
+            )
 
-    st.exception(e)
+    except Exception as e:
 
-    st.stop()
+        st.error("Failed to load PaddleOCR-VL.")
+
+        st.exception(e)
+
+        st.stop()
 
 
-uploaded = st.file_uploader(
-    "Upload one handwritten page",
+# ============================================================
+# IMAGE UPLOAD
+# ============================================================
+
+uploaded_file = st.file_uploader(
+    "Upload a handwritten examination page",
     type=["jpg", "jpeg", "png", "webp"]
 )
 
 
-if uploaded:
+# ============================================================
+# OCR
+# ============================================================
 
-    image = Image.open(uploaded).convert("RGB")
+if uploaded_file:
 
-    st.image(
-        image,
-        caption="Uploaded page",
-        use_container_width=True
-    )
+    image = Image.open(uploaded_file).convert("RGB")
 
-    if st.button(
-        "TEST OCR",
-        type="primary"
-    ):
+    st.subheader("Uploaded Examination Page")
 
-        st.write("3. Preparing image...")
+    col1, col2 = st.columns(2)
 
-        # Keep the test image reasonably small
-        max_size = 2000
+    with col1:
 
-        if max(image.size) > max_size:
-
-            scale = max_size / max(image.size)
-
-            image = image.resize(
-                (
-                    int(image.width * scale),
-                    int(image.height * scale)
-                ),
-                Image.Resampling.LANCZOS
-            )
-
-        st.write(
-            f"Test image size: {image.width} × {image.height}"
+        st.image(
+            image,
+            caption="Handwritten examination page",
+            use_container_width=True
         )
 
-        try:
+    with col2:
 
-            st.write("4. Running processor...")
+        st.subheader("OCR Result")
 
-            inputs = processor(
-                image,
-                return_tensors="pt"
-            )
+        if st.button(
+            "🔍 Run Handwriting OCR",
+            type="primary"
+        ):
 
-            st.write("✅ Processor completed")
+            prompt = """
+OCR:
 
-            st.write("5. Preparing tensors...")
+Transcribe all handwritten English text in this examination page.
 
-            for key in inputs:
+Instructions:
 
-                if torch.is_tensor(inputs[key]):
+1. Read the entire page.
+2. Preserve the original reading order.
+3. Preserve question numbers.
+4. Preserve paragraphs and line breaks where possible.
+5. Transcribe the student's handwriting exactly.
+6. Do not summarize.
+7. Do not explain the answer.
+8. Do not correct spelling or grammar.
+9. If a word is genuinely unreadable, write [UNCLEAR].
+10. Return only the transcription.
+"""
 
-                    inputs[key] = inputs[key].to("cpu")
+            messages = [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "image": image
+                        },
+                        {
+                            "type": "text",
+                            "text": prompt
+                        }
+                    ]
+                }
+            ]
 
-            st.write("✅ Tensors prepared")
+            try:
 
-            st.write("6. Starting GOT-OCR generation...")
+                with st.spinner(
+                    "Reading handwritten examination page..."
+                ):
 
-            with torch.inference_mode():
+                    text = processor.apply_chat_template(
+                        messages,
+                        tokenize=False,
+                        add_generation_prompt=True
+                    )
 
-                output = model.generate(
-                    **inputs,
-                    max_new_tokens=1024,
-                    do_sample=False
+                    inputs = processor(
+                        text=[text],
+                        images=[image],
+                        return_tensors="pt"
+                    )
+
+                    # Move tensors to model device
+                    if torch.cuda.is_available():
+
+                        inputs = {
+                            key: value.to("cuda")
+                            if hasattr(value, "to")
+                            else value
+                            for key, value in inputs.items()
+                        }
+
+                    with torch.inference_mode():
+
+                        generated_ids = model.generate(
+                            **inputs,
+                            max_new_tokens=2048,
+                            do_sample=False
+                        )
+
+                    result = processor.batch_decode(
+                        generated_ids,
+                        skip_special_tokens=True
+                    )[0]
+
+                    # Remove prompt if returned
+                    if text in result:
+                        result = result.split(
+                            text,
+                            1
+                        )[-1]
+
+                    result = result.strip()
+
+                st.success("OCR completed.")
+
+                st.text_area(
+                    "Transcribed handwriting",
+                    value=result,
+                    height=500
                 )
 
-            st.write("✅ Generation completed")
+                st.download_button(
+                    "⬇️ Download transcription",
+                    data=result,
+                    file_name="examina_ocr_result.txt",
+                    mime="text/plain"
+                )
 
-            st.write("7. Decoding result...")
+            except Exception as e:
 
-            result = processor.decode(
-                output[0],
-                skip_special_tokens=True
-            )
+                st.error("OCR failed.")
 
-            st.success("OCR completed!")
-
-            st.text_area(
-                "OCR RESULT",
-                result,
-                height=500
-            )
-
-        except Exception as e:
-
-            st.error("OCR PROCESSING FAILED")
-
-            st.exception(e)
+                st.exception(e)
