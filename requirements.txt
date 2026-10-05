@@ -1,8 +1,0 @@
-streamlit
-torch
-torchvision
-transformers>=4.57.1
-accelerate
-Pillow==11.2.1
-sentencepiece
-safetensors
