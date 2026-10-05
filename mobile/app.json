@@ -6,9 +6,17 @@
     "orientation": "portrait",
     "userInterfaceStyle": "light",
     "newArchEnabled": true,
+
+    "extra": {
+      "eas": {
+        "projectId": "24859bdf-3919-4b97-9750-5d3289e4bef8"
+      }
+    },
+
     "android": {
       "package": "com.examinaai.app"
     },
+
     "plugins": [
       [
         "expo-camera",
